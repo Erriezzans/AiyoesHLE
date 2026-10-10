@@ -248,6 +248,8 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
         );
         let (bundle_path, mut extra_options) = environment::app_picker::app_picker(options)?;
         option_args.append(&mut extra_options);
+        // The user picked a game: let the Android back button know.
+        window::notify_game_started();
         bundle_path
     };
     // When PowerShell does tab-completion on a directory, for some reason it
