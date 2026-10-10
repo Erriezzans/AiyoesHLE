@@ -31,7 +31,34 @@ import java.io.InputStream;
 
 public class MainActivity extends SDLActivity {
     private static final String TAG = "touchHLE";
+    private boolean exitDialogShowing = false;
 
+    @Override
+    public void onBackPressed() {
+        if (exitDialogShowing) return;
+        exitDialogShowing = true;
+        try {
+            new android.app.AlertDialog.Builder(this,
+                    android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("HyperHLE")
+                .setItems(new CharSequence[]{"Resume", "Exit"},
+                    new android.content.DialogInterface.OnClickListener() {
+                        public void onClick(android.content.DialogInterface d, int which) {
+                            if (which == 1) finish();
+                        }
+                    })
+                .setOnDismissListener(
+                    new android.content.DialogInterface.OnDismissListener() {
+                        public void onDismiss(android.content.DialogInterface d) {
+                            exitDialogShowing = false;
+                        }
+                    })
+                .show();
+        } catch (Exception e) {
+            exitDialogShowing = false;
+            super.onBackPressed();
+        }
+    }
     // Public accessor for SDLActivity's protected static mSingleton, so
     // helper classes in this package (HostMedia) can reach the Activity.
     public static android.app.Activity getActivity() {
@@ -396,9 +423,7 @@ public class MainActivity extends SDLActivity {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
-            "application/octet-stream", "application/zip",
-            "application/x-zip-compressed"});
+        intent.setType("*/*");
         try {
             startActivityForResult(
                 Intent.createChooser(intent, "Add game (.ipa)"),
