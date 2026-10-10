@@ -83,15 +83,12 @@ public class MainActivity extends SDLActivity {
             .show();
     }
 
-    // In a game: pause the emulator while the dialog is up, and offer to go
-    // back to the game list without closing the whole app.
+    // In a game: offer to go back to the game list without closing the whole
+    // app. The emulator pauses by itself while this dialog is up: SDL pauses
+    // the native thread when the activity window loses focus (and the guest
+    // app gets applicationWillResignActive), and resumes it when the dialog
+    // closes. That is the same mechanism the original Resume/Exit dialog used.
     private void showGameBackDialog() {
-        // SDL already pauses on window-focus loss, but not in multi-window
-        // mode, so pause explicitly as well. This is the same path onPause()
-        // uses: the emulator thread blocks in its event pump and the guest app
-        // gets applicationWillResignActive.
-        pauseNativeThread();
-        final boolean[] leaving = new boolean[]{false};
         new android.app.AlertDialog.Builder(this,
                 android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Game paused")
@@ -99,10 +96,8 @@ public class MainActivity extends SDLActivity {
                 new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int which) {
                         if (which == 1) {
-                            leaving[0] = true;
                             returnToMenu();
                         } else if (which == 2) {
-                            leaving[0] = true;
                             exitApp();
                         }
                     }
@@ -111,11 +106,6 @@ public class MainActivity extends SDLActivity {
                 new android.content.DialogInterface.OnDismissListener() {
                     public void onDismiss(android.content.DialogInterface d) {
                         exitDialogShowing = false;
-                        if (!leaving[0]) {
-                            // Sets mIsResumedCalled again; the emulator
-                            // actually continues once window focus returns.
-                            resumeNativeThread();
-                        }
                     }
                 })
             .show();
