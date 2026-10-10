@@ -31,10 +31,15 @@ import java.io.InputStream;
 
 public class MainActivity extends SDLActivity {
     private static final String TAG = "touchHLE";
+
+    // ---------------------------------------------------------------------
+    // Android back gesture / back button menu (Resume / Exit).
+    // SDLActivity forwards the back key to native code and swallows it, so
+    // the key has to be intercepted in dispatchKeyEvent before SDL sees it.
+    // ---------------------------------------------------------------------
     private boolean exitDialogShowing = false;
 
-    @Override
-    public void onBackPressed() {
+    private void showBackMenu() {
         if (exitDialogShowing) return;
         exitDialogShowing = true;
         try {
@@ -44,7 +49,9 @@ public class MainActivity extends SDLActivity {
                 .setItems(new CharSequence[]{"Resume", "Exit"},
                     new android.content.DialogInterface.OnClickListener() {
                         public void onClick(android.content.DialogInterface d, int which) {
-                            if (which == 1) finish();
+                            if (which == 1) {
+                                finishAffinity();
+                            }
                         }
                     })
                 .setOnDismissListener(
@@ -56,9 +63,27 @@ public class MainActivity extends SDLActivity {
                 .show();
         } catch (Exception e) {
             exitDialogShowing = false;
-            super.onBackPressed();
+            Log.e(TAG, "Couldn't show back menu", e);
         }
     }
+
+    @Override
+    public void onBackPressed() {
+        showBackMenu();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == android.view.KeyEvent.ACTION_UP
+                    && !event.isCanceled()) {
+                showBackMenu();
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     // Public accessor for SDLActivity's protected static mSingleton, so
     // helper classes in this package (HostMedia) can reach the Activity.
     public static android.app.Activity getActivity() {
@@ -422,7 +447,9 @@ public class MainActivity extends SDLActivity {
     private void openIpaPicker() {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
+        // No MIME-type filter: phones label .ipa files with many different
+        // types, and a filter greys them out. The .ipa extension is added
+        // to the copied file's name in onActivityResult if it's missing.
         intent.setType("*/*");
         try {
             startActivityForResult(
