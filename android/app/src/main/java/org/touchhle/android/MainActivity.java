@@ -31,7 +31,7 @@ import java.io.InputStream;
 
 public class MainActivity extends SDLActivity {
     private static final String TAG = "touchHLE";
-    private boolean exitDialogShowing = false;
+    private android.app.AlertDialog backDialog = null;
 
     // Set by Rust (see window.rs notify_game_started) once the user has picked
     // a game in the app picker. false = the menu is showing.
@@ -46,24 +46,30 @@ public class MainActivity extends SDLActivity {
 
     @Override
     public void onBackPressed() {
-        if (exitDialogShowing) return;
-        exitDialogShowing = true;
+        // Ask the dialog itself whether it is still up, instead of trusting a
+        // flag that could get stuck and silently swallow every swipe.
+        if (backDialog != null && backDialog.isShowing()) return;
+        // TEMPORARY diagnostic: proves the swipe reached this method.
+        android.widget.Toast.makeText(this,
+                inGame ? "back: game" : "back: menu",
+                android.widget.Toast.LENGTH_SHORT).show();
         try {
             if (inGame) {
                 showGameBackDialog();
             } else {
                 showMenuBackDialog();
             }
-        } catch (Exception e) {
-            exitDialogShowing = false;
-            super.onBackPressed();
+        } catch (Throwable t) {
+            Log.e(TAG, "Back dialog failed", t);
+            android.widget.Toast.makeText(this,
+                    "dialog error: " + t, android.widget.Toast.LENGTH_LONG).show();
         }
     }
 
     // In the app picker menu there is nothing to "resume", so just confirm
     // that the user wants to leave the app.
     private void showMenuBackDialog() {
-        new android.app.AlertDialog.Builder(this,
+        backDialog = new android.app.AlertDialog.Builder(this,
                 android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("HyperHLE")
             .setMessage("Exit HyperHLE?")
@@ -74,12 +80,6 @@ public class MainActivity extends SDLActivity {
                     }
                 })
             .setNegativeButton("Cancel", null)
-            .setOnDismissListener(
-                new android.content.DialogInterface.OnDismissListener() {
-                    public void onDismiss(android.content.DialogInterface d) {
-                        exitDialogShowing = false;
-                    }
-                })
             .show();
     }
 
@@ -89,7 +89,7 @@ public class MainActivity extends SDLActivity {
     // app gets applicationWillResignActive), and resumes it when the dialog
     // closes. That is the same mechanism the original Resume/Exit dialog used.
     private void showGameBackDialog() {
-        new android.app.AlertDialog.Builder(this,
+        backDialog = new android.app.AlertDialog.Builder(this,
                 android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Game paused")
             .setItems(new CharSequence[]{"Resume", "Back to menu", "Exit app"},
@@ -100,12 +100,6 @@ public class MainActivity extends SDLActivity {
                         } else if (which == 2) {
                             exitApp();
                         }
-                    }
-                })
-            .setOnDismissListener(
-                new android.content.DialogInterface.OnDismissListener() {
-                    public void onDismiss(android.content.DialogInterface d) {
-                        exitDialogShowing = false;
                     }
                 })
             .show();
@@ -127,9 +121,10 @@ public class MainActivity extends SDLActivity {
                 return;
             }
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            Intent helper = new Intent(this, RestartActivity.class);
-            helper.putExtra(RestartActivity.EXTRA_NEXT_INTENT, launch);
-            helper.putExtra(RestartActivity.EXTRA_OLD_PID, android.os.Process.myPid());
+            Intent helper = new Intent();
+            helper.setClassName(this, "org.touchhle.android.RestartActivity");
+            helper.putExtra("next_intent", launch);
+            helper.putExtra("old_pid", android.os.Process.myPid());
             helper.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(helper);
             killProcessOnDestroy = true;
@@ -155,6 +150,25 @@ public class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // TEMPORARY diagnostic: proves this build is the one installed.
+        android.widget.Toast.makeText(this, "back-fix build v3",
+                android.widget.Toast.LENGTH_SHORT).show();
+        // Android 13+ delivers the back gesture through the back-invoked
+        // dispatcher. Register explicitly so the swipe always reaches
+        // onBackPressed(), whatever the app's target SDK / opt-in state.
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            try {
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    new android.window.OnBackInvokedCallback() {
+                        public void onBackInvoked() {
+                            onBackPressed();
+                        }
+                    });
+            } catch (Throwable t) {
+                Log.w(TAG, "Couldn't register back callback", t);
+            }
+        }
         // Acquire the multicast lock here (not just declare it): Android
         // Wi-Fi drivers drop multicast unless the app holds it, which broke
         // Bonjour/NSNetService LAN discovery (GameKit, Gameloft games).
