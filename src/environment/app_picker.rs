@@ -678,11 +678,24 @@ fn app_picker_inner(
         }
     };
 
-    let mut quick_options_cheat_engine = quick_options_trainer_enabled(&env.options);
+    let saved_options = SavedQuickOptions::load();
+    let options_cheat_engine = quick_options_trainer_enabled(&env.options);
+    let mut quick_options_cheat_engine = saved_options
+        .cheat_engine
+        .unwrap_or(options_cheat_engine);
     let angle_backend_available = crate::window::angle_backend_available();
     let (mut quick_options_gles_native, quick_options_gles_native_switch_enabled) =
         quick_options_gles_native_state(&env.options, angle_backend_available);
-    let quick_options_force_composition_enabled = env.options.force_composition;
+    let options_gles_native = quick_options_gles_native;
+    if quick_options_gles_native_switch_enabled {
+        if let Some(saved_gles_native) = saved_options.gles_native {
+            quick_options_gles_native = saved_gles_native || !angle_backend_available;
+        }
+    }
+    let quick_options_force_composition_enabled = saved_options
+        .force_composition
+        .unwrap_or(env.options.force_composition);
+    let fullscreen_row_shown = !crate::window::Window::rotatable_fullscreen();
     let settings = setup_settings(
         env,
         delegate,
@@ -692,18 +705,32 @@ fn app_picker_inner(
         quick_options_gles_native,
         quick_options_gles_native_switch_enabled,
         quick_options_force_composition_enabled,
-        !crate::window::Window::rotatable_fullscreen(),
+        fullscreen_row_shown,
+        &saved_options,
     );
-    let mut quick_options_scale_hack: Option<NonZeroU32> = None;
-    let mut quick_options_fullscreen: Option<()> = None;
-    let mut quick_options_orientation: Option<DeviceOrientation> = None;
-    let mut quick_options_analog_stick_tilt_controls = true;
-    let mut quick_options_network = false;
-    let mut quick_options_show_fps = false;
-    let mut quick_options_trace_gl_errors = false;
-    let mut quick_options_force_composition_override: Option<bool> = None;
+    let mut quick_options_scale_hack: Option<NonZeroU32> =
+        NonZeroU32::new(saved_options.scale_hack);
+    let mut quick_options_fullscreen: Option<()> = if fullscreen_row_shown {
+        saved_options.fullscreen.then_some(())
+    } else {
+        None
+    };
+    let mut quick_options_orientation: Option<DeviceOrientation> = match saved_options.orientation {
+        1 => Some(DeviceOrientation::LandscapeLeft),
+        2 => Some(DeviceOrientation::LandscapeRight),
+        3 => Some(DeviceOrientation::PortraitUpsideDown),
+        _ => None,
+    };
+    let mut quick_options_analog_stick_tilt_controls = saved_options.analog_stick_tilt_controls;
+    let mut quick_options_network = saved_options.network;
+    let mut quick_options_show_fps = saved_options.show_fps;
+    let mut quick_options_trace_gl_errors = saved_options.trace_gl_errors;
+    let mut quick_options_force_composition_override: Option<bool> = saved_options.force_composition;
     let mut device_state = DropdownState::default();
+    device_state.selected = saved_options.device_tag;
     let mut language_state = DropdownState::default();
+    language_state.selected = saved_options.language_tag;
+    let mut last_saved_options = saved_options;
 
     update_scale_hack_buttons(env, &settings.scale_hack_buttons, quick_options_scale_hack);
     update_orientation_buttons(env, &settings.orientation_buttons, quick_options_orientation);
@@ -1052,6 +1079,39 @@ fn app_picker_inner(
                 false => None,
                 true => Some(()),
             };
+        }
+
+        // Persist the settings whenever one of them changes.
+        let current_options = SavedQuickOptions {
+            scale_hack: quick_options_scale_hack.map_or(0, |v| v.get()),
+            orientation: match quick_options_orientation {
+                Some(DeviceOrientation::LandscapeLeft) => 1,
+                Some(DeviceOrientation::LandscapeRight) => 2,
+                Some(DeviceOrientation::PortraitUpsideDown) => 3,
+                _ => 0,
+            },
+            fullscreen: quick_options_fullscreen.is_some(),
+            analog_stick_tilt_controls: quick_options_analog_stick_tilt_controls,
+            network: quick_options_network,
+            show_fps: quick_options_show_fps,
+            trace_gl_errors: quick_options_trace_gl_errors,
+            cheat_engine: saved_tristate(
+                quick_options_cheat_engine,
+                options_cheat_engine,
+                last_saved_options.cheat_engine,
+            ),
+            gles_native: saved_tristate(
+                quick_options_gles_native,
+                options_gles_native,
+                last_saved_options.gles_native,
+            ),
+            force_composition: quick_options_force_composition_override,
+            device_tag: device_state.selected,
+            language_tag: language_state.selected,
+        };
+        if current_options != last_saved_options {
+            current_options.save();
+            last_saved_options = current_options;
         }
 
         // Detect .ipa files copied in by the "+" tile flow and refresh the
@@ -2039,6 +2099,7 @@ fn setup_settings(
     gles_native_switch_enabled: bool,
     force_composition_enabled: bool,
     show_fullscreen_row: bool,
+    saved: &SavedQuickOptions,
 ) -> SettingsStuff {
     let width = app_frame.size.width;
     let height = app_frame.size.height;
@@ -2151,7 +2212,7 @@ fn setup_settings(
         display_rows.push(SettingsRow::Toggle(
             "Fullscreen (override)",
             "fullscreen:",
-            false,
+            saved.fullscreen,
             true,
         ));
     }
@@ -2171,8 +2232,8 @@ fn setup_settings(
                 force_composition_enabled,
                 true,
             ),
-            SettingsRow::Toggle("Show FPS", "showFPS:", false, true),
-            SettingsRow::Toggle("Trace GL errors", "traceGLErrors:", false, true),
+            SettingsRow::Toggle("Show FPS", "showFPS:", saved.show_fps, true),
+            SettingsRow::Toggle("Trace GL errors", "traceGLErrors:", saved.trace_gl_errors, true),
         ],
     ));
     sections.push((
@@ -2186,11 +2247,11 @@ fn setup_settings(
         "EMULATION",
         vec![
             SettingsRow::Toggle("Cheat Engine", "cheatEngine:", cheat_engine_enabled, true),
-            SettingsRow::Toggle("Network access", "network:", false, true),
+            SettingsRow::Toggle("Network access", "network:", saved.network, true),
             SettingsRow::Toggle(
                 "Use analog sticks for tilt controls",
                 "analogStickTiltControls:",
-                true,
+                saved.analog_stick_tilt_controls,
                 true,
             ),
         ],
@@ -2453,6 +2514,124 @@ fn language_dropdown_spec() -> DropdownSpec {
 }
 
 /// The button title of the language dropdown for the chosen tag.
+/// Quick options persisted between launches, so toggles like network access
+/// and the device model survive closing the app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SavedQuickOptions {
+    scale_hack: u32,  // 0 = none
+    orientation: u8,  // 0 = none, 1 = landscape left, 2 = landscape right, 3 = upside down
+    fullscreen: bool,
+    analog_stick_tilt_controls: bool,
+    network: bool,
+    show_fps: bool,
+    trace_gl_errors: bool,
+    // `None` means "the user never changed it, so follow the options files".
+    cheat_engine: Option<bool>,
+    gles_native: Option<bool>,
+    force_composition: Option<bool>,
+    device_tag: Option<i32>,
+    language_tag: Option<i32>,
+}
+
+impl Default for SavedQuickOptions {
+    fn default() -> Self {
+        SavedQuickOptions {
+            scale_hack: 0,
+            orientation: 0,
+            fullscreen: false,
+            analog_stick_tilt_controls: true,
+            network: false,
+            show_fps: false,
+            trace_gl_errors: false,
+            cheat_engine: None,
+            gles_native: None,
+            force_composition: None,
+            device_tag: None,
+            language_tag: None,
+        }
+    }
+}
+
+const QUICK_OPTIONS_FILE: &str = "touchHLE_quick_options.txt";
+
+/// Keep an "unset" tri-state option unset until the user actually changes it.
+fn saved_tristate(current: bool, default: bool, previous: Option<bool>) -> Option<bool> {
+    if current != default || previous.is_some() {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+impl SavedQuickOptions {
+    fn path() -> PathBuf {
+        paths::user_data_base_path().join(QUICK_OPTIONS_FILE)
+    }
+
+    fn load() -> Self {
+        let mut out = Self::default();
+        let Ok(text) = std::fs::read_to_string(Self::path()) else {
+            return out;
+        };
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let (k, v) = (k.trim(), v.trim());
+            let flag = v == "1";
+            let tri = match v {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            };
+            match k {
+                "scale_hack" => out.scale_hack = v.parse().unwrap_or(0).min(4),
+                "orientation" => out.orientation = v.parse().unwrap_or(0).min(3),
+                "fullscreen" => out.fullscreen = flag,
+                "tilt" => out.analog_stick_tilt_controls = v != "0",
+                "network" => out.network = flag,
+                "show_fps" => out.show_fps = flag,
+                "trace_gl_errors" => out.trace_gl_errors = flag,
+                "cheat_engine" => out.cheat_engine = tri,
+                "gles_native" => out.gles_native = tri,
+                "force_composition" => out.force_composition = tri,
+                "device_tag" => out.device_tag = v.parse().ok(),
+                "language_tag" => out.language_tag = v.parse().ok(),
+                _ => (),
+            }
+        }
+        out
+    }
+
+    fn save(&self) {
+        fn tri(v: Option<bool>) -> &'static str {
+            match v {
+                Some(true) => "1",
+                Some(false) => "0",
+                None => "",
+            }
+        }
+        let text = format!(
+            "scale_hack={}\norientation={}\nfullscreen={}\ntilt={}\nnetwork={}\nshow_fps={}\ntrace_gl_errors={}\ncheat_engine={}\ngles_native={}\nforce_composition={}\ndevice_tag={}\nlanguage_tag={}\n",
+            self.scale_hack,
+            self.orientation,
+            self.fullscreen as u8,
+            self.analog_stick_tilt_controls as u8,
+            self.network as u8,
+            self.show_fps as u8,
+            self.trace_gl_errors as u8,
+            tri(self.cheat_engine),
+            tri(self.gles_native),
+            tri(self.force_composition),
+            self.device_tag.map_or(String::new(), |t| t.to_string()),
+            self.language_tag.map_or(String::new(), |t| t.to_string()),
+        );
+        if let Err(e) = std::fs::write(Self::path(), text) {
+            log!("Couldn't save quick options: {}", e);
+        }
+    }
+}
+
 fn language_label_for_tag(tag: Option<i32>) -> String {
     let idx = tag.unwrap_or(0) as usize;
     LANGUAGE_CHOICES
