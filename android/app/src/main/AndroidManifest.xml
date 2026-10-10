@@ -126,6 +126,16 @@
             -->
         </activity>
 
+        <!-- Tiny helper that runs in its own process so the main process can
+             be fully killed and relaunched ("Back to menu" from a game). -->
+        <activity
+            android:name="org.touchhle.android.RestartActivity"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <provider
             android:name="org.touchhle.android.DocumentsProvider"
             android:authorities="${applicationId}.provider"
