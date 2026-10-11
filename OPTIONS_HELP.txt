@@ -433,6 +433,16 @@ Other options:
     --no-stretch-to-screen
         Turns --stretch-to-screen off again.
 
+    --fix-movie-player
+        Changes MPMoviePlayerController to defer loading until prepareToPlay or
+        play, and to stay hidden until the first video frame is presented. Fixes
+        the black movie-player panel in Grand Theft Auto III. Off by default.
+
+    --rotation-fix
+        EAGL's 180-degree autorotation compensation normally assumes every iPad
+        app rotated its root view. This makes it follow whether UIKit actually
+        applied the autorotation transform instead. Off by default.
+
     --allow-network-access
         Allow apps running in touchHLE to access the Internet and the local network.
 
