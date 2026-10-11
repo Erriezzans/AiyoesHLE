@@ -295,6 +295,7 @@ struct AppPickerDelegateHostObject {
     orientation_portrait_upside_down: bool,
     analog_stick_tilt_controls: Option<bool>,
     network: Option<bool>,
+    stretch_to_screen: Option<bool>,
     show_fps: Option<bool>,
     cheat_engine: Option<bool>,
     trace_gl_errors: Option<bool>,
@@ -385,6 +386,10 @@ const CLASSES: ClassExports = objc_classes! {
 - (())analogStickTiltControls:(id)switch { // UISwitch*
     let switch_state: bool = msg![env; switch isOn];
     env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).analog_stick_tilt_controls = Some(switch_state);
+}
+- (())stretchToScreen:(id)switch { // UISwitch*
+    let switch_state: bool = msg![env; switch isOn];
+    env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).stretch_to_screen = Some(switch_state);
 }
 - (())network:(id)switch { // UISwitch*
     let switch_state: bool = msg![env; switch isOn];
@@ -739,6 +744,7 @@ fn app_picker_inner(
     };
     let mut quick_options_analog_stick_tilt_controls = saved_options.analog_stick_tilt_controls;
     let mut quick_options_network = saved_options.network;
+    let mut quick_options_stretch_to_screen = saved_options.stretch_to_screen;
     let mut quick_options_show_fps = saved_options.show_fps;
     let mut quick_options_trace_gl_errors = saved_options.trace_gl_errors;
     let mut quick_options_force_composition_override: Option<bool> = saved_options.force_composition;
@@ -1097,6 +1103,8 @@ fn app_picker_inner(
             quick_options_analog_stick_tilt_controls = enabled;
         } else if let Some(enabled) = std::mem::take(&mut host_obj.network) {
             quick_options_network = enabled;
+        } else if let Some(enabled) = std::mem::take(&mut host_obj.stretch_to_screen) {
+            quick_options_stretch_to_screen = enabled;
         } else if let Some(enabled) = std::mem::take(&mut host_obj.cheat_engine) {
             quick_options_cheat_engine = enabled;
         } else if let Some(enabled) = std::mem::take(&mut host_obj.show_fps) {
@@ -1126,6 +1134,7 @@ fn app_picker_inner(
             fullscreen: quick_options_fullscreen.is_some(),
             analog_stick_tilt_controls: quick_options_analog_stick_tilt_controls,
             network: quick_options_network,
+            stretch_to_screen: quick_options_stretch_to_screen,
             show_fps: quick_options_show_fps,
             trace_gl_errors: quick_options_trace_gl_errors,
             cheat_engine: saved_tristate(
@@ -1192,6 +1201,9 @@ fn app_picker_inner(
     }
     if quick_options_network {
         option_args.push("--allow-network-access".to_string());
+    }
+    if quick_options_stretch_to_screen {
+        option_args.push("--stretch-to-screen".to_string());
     }
     option_args.push(quick_options_trainer_argument(quick_options_cheat_engine).to_string());
 
@@ -2282,6 +2294,12 @@ fn setup_settings(
             SettingsRow::Toggle("Cheat Engine", "cheatEngine:", cheat_engine_enabled, true),
             SettingsRow::Toggle("Network access", "network:", saved.network, true),
             SettingsRow::Toggle(
+                "Stretch to fill screen",
+                "stretchToScreen:",
+                saved.stretch_to_screen,
+                true,
+            ),
+            SettingsRow::Toggle(
                 "Use analog sticks for tilt controls",
                 "analogStickTiltControls:",
                 saved.analog_stick_tilt_controls,
@@ -2556,6 +2574,7 @@ struct SavedQuickOptions {
     fullscreen: bool,
     analog_stick_tilt_controls: bool,
     network: bool,
+    stretch_to_screen: bool,
     show_fps: bool,
     trace_gl_errors: bool,
     // `None` means "the user never changed it, so follow the options files".
@@ -2574,6 +2593,7 @@ impl Default for SavedQuickOptions {
             fullscreen: false,
             analog_stick_tilt_controls: true,
             network: false,
+            stretch_to_screen: false,
             show_fps: false,
             trace_gl_errors: false,
             cheat_engine: None,
@@ -2623,6 +2643,7 @@ impl SavedQuickOptions {
                 "fullscreen" => out.fullscreen = flag,
                 "tilt" => out.analog_stick_tilt_controls = v != "0",
                 "network" => out.network = flag,
+                "stretch_to_screen" => out.stretch_to_screen = flag,
                 "show_fps" => out.show_fps = flag,
                 "trace_gl_errors" => out.trace_gl_errors = flag,
                 "cheat_engine" => out.cheat_engine = tri,
@@ -2645,12 +2666,13 @@ impl SavedQuickOptions {
             }
         }
         let text = format!(
-            "scale_hack={}\norientation={}\nfullscreen={}\ntilt={}\nnetwork={}\nshow_fps={}\ntrace_gl_errors={}\ncheat_engine={}\ngles_native={}\nforce_composition={}\ndevice_tag={}\nlanguage_tag={}\n",
+            "scale_hack={}\norientation={}\nfullscreen={}\ntilt={}\nnetwork={}\nstretch_to_screen={}\nshow_fps={}\ntrace_gl_errors={}\ncheat_engine={}\ngles_native={}\nforce_composition={}\ndevice_tag={}\nlanguage_tag={}\n",
             self.scale_hack,
             self.orientation,
             self.fullscreen as u8,
             self.analog_stick_tilt_controls as u8,
             self.network as u8,
+            self.stretch_to_screen as u8,
             self.show_fps as u8,
             self.trace_gl_errors as u8,
             tri(self.cheat_engine),
