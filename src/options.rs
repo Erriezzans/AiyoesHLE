@@ -632,6 +632,12 @@ impl Options {
             // forced `GL_LINEAR` would visibly degrade quality.
             self.fix_texture_min_filter = false;
             std::env::set_var("TOUCHHLE_FIX_TEXTURE_MIN_FILTER", "0");
+        } else if arg == "--native-es1-array-guard" {
+            // Read by GLES1Native via the environment (no `Options` access
+            // inside the GL call path). On by default.
+            std::env::set_var("TOUCHHLE_ES1_ARRAY_GUARD", "1");
+        } else if arg == "--no-native-es1-array-guard" {
+            std::env::set_var("TOUCHHLE_ES1_ARRAY_GUARD", "0");
         } else if let Some(value) = arg.strip_prefix("--zero-stack-after-guest-to-host-call=") {
             self.zero_stack_after_guest_to_host_call = Some(value.parse().map_err(|_| {
                 "Invalid value for --zero-stack-after-guest-to-host-call=".to_string()
