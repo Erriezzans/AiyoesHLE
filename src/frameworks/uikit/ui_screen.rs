@@ -28,7 +28,16 @@ fn screen_pixel_size_for_current_orientation(env: &mut crate::Environment) -> (C
 }
 
 fn screen_size_for_current_orientation(env: &mut crate::Environment) -> (u32, u32) {
-    let portrait_size = env.window().device_family().portrait_size();
+    // The app picker lays itself out on a screen shaped like the host display
+    // (see `Environment::new_without_app`), so its UIScreen has to report that
+    // size; otherwise the UI is laid out for the fixed device-family size and
+    // then stretched to a different aspect ratio (distorted icons, offset
+    // touches). Games keep the device-family size.
+    let portrait_size = if env.is_app_picker {
+        env.window().screen_size()
+    } else {
+        env.window().device_family().portrait_size()
+    };
     let orientation = env.window().current_rotation();
     let landscape_bounds = crate::env_flag_cached!("TOUCHHLE_LANDSCAPE_UISCREEN_BOUNDS");
     screen_size_for_orientation(portrait_size, orientation, landscape_bounds)
