@@ -44,6 +44,22 @@ use std::time::{Duration, Instant};
 /// window event handler and consumed by the picker loop.
 static PENDING_ARROW_KEY: AtomicI8 = AtomicI8::new(0);
 
+/// Whether the Settings screen is currently showing. Read by the Android shell
+/// so a back gesture there closes Settings instead of offering to exit.
+static SETTINGS_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the Android shell when the back gesture happens while Settings is
+/// open; the picker then closes Settings, like pressing "Done".
+static PENDING_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn settings_open() -> bool {
+    SETTINGS_OPEN.load(Ordering::Relaxed)
+}
+
+pub fn post_back() {
+    PENDING_BACK.store(true, Ordering::Relaxed);
+}
+
 /// Records an arrow key press for the app picker to act on.
 pub fn post_arrow_key(dir: i8) {
     PENDING_ARROW_KEY.store(dir, Ordering::Relaxed);
@@ -772,6 +788,23 @@ fn app_picker_inner(
     // process exits.
     let app_path = loop {
         run_run_loop_single_iteration(env, main_run_loop);
+        // Tell the Android shell whether Settings is open, and close it when
+        // the shell reports a back gesture.
+        {
+            let settings_view = settings.main_view;
+            let settings_is_open: bool = !msg![env; settings_view isHidden];
+            SETTINGS_OPEN.store(settings_is_open, Ordering::Relaxed);
+            if PENDING_BACK.swap(false, Ordering::Relaxed) && settings_is_open {
+                slide_settings_screen(
+                    env,
+                    main_run_loop,
+                    delegate,
+                    settings.main_view,
+                    app_frame.size.width,
+                    false,
+                );
+            }
+        }
         // Left/right arrow keys switch pages, like tapping the page arrows.
         let arrow = PENDING_ARROW_KEY.swap(0, Ordering::Relaxed);
         if arrow != 0 {
