@@ -248,10 +248,11 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
         );
         let (bundle_path, mut extra_options) = environment::app_picker::app_picker(options)?;
         option_args.append(&mut extra_options);
-        // The user picked a game: let the Android back button know.
-        window::notify_game_started();
         bundle_path
     };
+    // Tell the Android shell that a game (not just the app picker) is running,
+    // so its back-gesture menu can offer game-specific options.
+    GAME_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
     // When PowerShell does tab-completion on a directory, for some reason it
     // expands it to `'..\My Bundle.app\'` and that trailing \ seems to
     // get interpreted as escaping a double quotation mark?
@@ -531,4 +532,18 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             Err(message)
         }
     }
+}
+
+/// Whether an app has been picked (or was specified on the command line), as
+/// opposed to the app picker still being on screen.
+static GAME_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called from `MainActivity.java` (`nativeIsGameRunning`) on Android.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_org_touchhle_android_MainActivity_nativeIsGameRunning(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) -> u8 {
+    GAME_RUNNING.load(std::sync::atomic::Ordering::Relaxed) as u8
 }
