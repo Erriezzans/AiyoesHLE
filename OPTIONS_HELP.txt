@@ -484,7 +484,17 @@ Other options:
         iOS title that legitimately relies on mipmap minification and
         would visibly lose quality under the forced GL_LINEAR.
 
-    --zero-stack-after-guest-to-host-call=<bytes>
+    --native-es1-array-guard
+--no-native-es1-array-guard
+
+Native OpenGL ES 1.1 only. Before every draw call, temporarily disable
+any enabled vertex/normal/color/texcoord client array that has no buffer
+object and a NULL pointer, then re-enable it afterwards. Strict drivers
+(notably Qualcomm Adreno) otherwise crash the whole process inside the
+driver. On by default; --no-native-es1-array-guard turns it off (for
+example to compare behaviour, or if it costs too much performance).
+
+--zero-stack-after-guest-to-host-call=<bytes>
         After a guest-to-host call returns, zero out the given number of
         bytes immediately below the current stack pointer (i.e. the unused
         scratch region of the guest's full-descending stack).
