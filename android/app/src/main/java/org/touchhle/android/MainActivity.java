@@ -124,7 +124,7 @@ public class MainActivity extends SDLActivity {
         try {
             android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this,
                     android.R.style.Theme_DeviceDefault_Dialog_Alert);
-            b.setTitle("HyperHLE");
+            b.setTitle("AiyoesHLE");
             if (inGame) {
                 pauseForBackMenu();
                 b.setItems(new CharSequence[]{"Resume", "Back to game list", "Exit app"},
@@ -138,7 +138,7 @@ public class MainActivity extends SDLActivity {
                         }
                     });
             } else {
-                b.setMessage("Exit HyperHLE?");
+                b.setMessage("Exit AiyoesHLE?");
                 b.setPositiveButton("Exit",
                     new android.content.DialogInterface.OnClickListener() {
                         public void onClick(android.content.DialogInterface d, int which) {
