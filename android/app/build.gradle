@@ -87,7 +87,7 @@ android {
         resValue 'string', 'app_name', 'AiyoesHLE'
         buildConfigField 'String', 'APP_NAME', '"AiyoesHLE"'
         manifestPlaceholders = [
-                icon: join('@drawable/icon', '_', branding.toLowerCase())
+                icon: '@mipmap/ic_launcher'
         ]
         buildConfigField 'int', 'APP_ICON', join('R.drawable.icon', '_', branding.toLowerCase())
 
