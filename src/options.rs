@@ -96,6 +96,14 @@ pub struct Options {
     /// Stretch the app to fill the whole screen instead of keeping its own
     /// aspect ratio (`--stretch-to-screen`).
     pub stretch_to_screen: bool,
+    /// Defer `MPMoviePlayerController` loading until `prepareToPlay`/`play`
+    /// and use hidden-until-first-frame rendering (`--fix-movie-player`).
+    /// Needed by e.g. Grand Theft Auto III.
+    pub fix_movie_player: bool,
+    /// Base EAGL's 180-degree autorotation compensation on whether UIKit
+    /// actually applied the autorotation transform (`--rotation-fix`),
+    /// instead of the legacy iPad heuristic.
+    pub rotation_fix: bool,
     pub device_family: Option<DeviceFamily>,
     pub auto_device_family: bool,
     /// When set, the guest sees a screen of exactly this size (in points) and
@@ -263,6 +271,8 @@ impl Default for Options {
         Options {
             fullscreen: false,
             stretch_to_screen: false,
+            fix_movie_player: false,
+            rotation_fix: false,
             trainer_disabled: true,
             device_family: None,
             auto_device_family: false,
@@ -370,6 +380,10 @@ impl Options {
             self.stretch_to_screen = true;
         } else if arg == "--no-stretch-to-screen" {
             self.stretch_to_screen = false;
+        } else if arg == "--fix-movie-player" {
+            self.fix_movie_player = true;
+        } else if arg == "--rotation-fix" {
+            self.rotation_fix = true;
         } else if arg == "--fix-music" {
             self.gd_music_bypass = true;
         } else if arg == "--landscape-left" {
