@@ -641,31 +641,61 @@ fn app_picker_inner(
         () = msg![env; main_view addSubview:label];
     }
 
-    let brand_color: id = if crate::branding() == "UNOFFICIAL" {
-        msg_class![env; UIColor redColor]
-    } else {
-        msg_class![env; UIColor grayColor]
+    // Title block: the app name in large iOS-blue Helvetica Neue, with a small
+    // iOS-gray credit line for the upstream fork underneath it.
+    let title_color: id = {
+        let (r, g, b, a): (CGFloat, CGFloat, CGFloat, CGFloat) = (0.0, 122.0 / 255.0, 1.0, 1.0);
+        msg_class![env; UIColor colorWithRed:r green:g blue:b alpha:a]
     };
+    let subtitle_color: id = {
+        let (r, g, b, a): (CGFloat, CGFloat, CGFloat, CGFloat) =
+            (142.0 / 255.0, 142.0 / 255.0, 147.0 / 255.0, 1.0);
+        msg_class![env; UIColor colorWithRed:r green:g blue:b alpha:a]
+    };
+    let bg_color: id = msg_class![env; UIColor clearColor];
 
     let title_frame = CGRect {
-        origin: CGPoint { x: 12.0, y: 8.0 },
+        origin: CGPoint { x: 12.0, y: 6.0 },
         size: CGSize {
             width: app_frame.size.width - 24.0,
-            height: 34.0,
+            height: APP_PICKER_TITLE_HEIGHT,
         },
     };
     let title: id = msg_class![env; UILabel alloc];
     let title: id = msg![env; title initWithFrame:title_frame];
-    let text = ns_string::from_rust_string(env, HYPERHLE_FORK_NAME.to_string());
+    let text = ns_string::from_rust_string(env, APP_PICKER_TITLE.to_string());
     () = msg![env; title setText:text];
     () = msg![env; title setTextAlignment:UITextAlignmentCenter];
-    let font_size: CGFloat = 28.0;
-    let font: id = msg_class![env; UIFont boldSystemFontOfSize:font_size];
+    let font_size: CGFloat = 30.0;
+    let font_name = ns_string::from_rust_string(env, "HelveticaNeue-Bold".to_string());
+    let font: id = msg_class![env; UIFont fontWithName:font_name size:font_size];
     () = msg![env; title setFont:font];
-    () = msg![env; title setTextColor:brand_color];
-    let bg_color: id = msg_class![env; UIColor clearColor];
+    () = msg![env; title setTextColor:title_color];
     () = msg![env; title setBackgroundColor:bg_color];
     () = msg![env; main_view addSubview:title];
+
+    let subtitle_frame = CGRect {
+        origin: CGPoint {
+            x: 12.0,
+            y: title_frame.origin.y + APP_PICKER_TITLE_HEIGHT,
+        },
+        size: CGSize {
+            width: app_frame.size.width - 24.0,
+            height: APP_PICKER_SUBTITLE_HEIGHT,
+        },
+    };
+    let subtitle: id = msg_class![env; UILabel alloc];
+    let subtitle: id = msg![env; subtitle initWithFrame:subtitle_frame];
+    let text = ns_string::from_rust_string(env, HYPERHLE_FORK_NAME.to_string());
+    () = msg![env; subtitle setText:text];
+    () = msg![env; subtitle setTextAlignment:UITextAlignmentCenter];
+    let font_size: CGFloat = 13.0;
+    let font_name = ns_string::from_rust_string(env, "HelveticaNeue".to_string());
+    let font: id = msg_class![env; UIFont fontWithName:font_name size:font_size];
+    () = msg![env; subtitle setFont:font];
+    () = msg![env; subtitle setTextColor:subtitle_color];
+    () = msg![env; subtitle setBackgroundColor:bg_color];
+    () = msg![env; main_view addSubview:subtitle];
 
     let mut icon_grid_stuff = match &mut apps {
         Ok(ref mut apps) => {
@@ -1253,11 +1283,15 @@ fn app_picker_inner(
 }
 
 const HYPERHLE_FORK_NAME: &str = "HyperHLE-Fork";
+/// The name shown as the large title of the launcher.
+const APP_PICKER_TITLE: &str = "AiyoesHLE";
+const APP_PICKER_TITLE_HEIGHT: CGFloat = 36.0;
+const APP_PICKER_SUBTITLE_HEIGHT: CGFloat = 16.0;
 
 const APP_PICKER_VERSION_LABEL_HEIGHT: CGFloat = 15.0;
 const APP_PICKER_VERSION_LABEL_BOTTOM_INSET: CGFloat = 5.0;
 const APP_PICKER_FOOTER_GAP: CGFloat = 10.0;
-const APP_PICKER_GRID_TOP: CGFloat = 44.0;
+const APP_PICKER_GRID_TOP: CGFloat = 64.0;
 const APP_PICKER_ICON_ROWS: usize = 4;
 
 const ICON_SIZE: CGSize = CGSize {
