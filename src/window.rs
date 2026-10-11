@@ -747,6 +747,9 @@ pub struct Window {
     fullscreen: bool,
     scale_hack: NonZeroU32,
     host_screen_size: Option<(u32, u32)>,
+    /// Copy of `stretch_to_screen` on [Options]: fill the whole drawable
+    /// instead of preserving the app's aspect ratio.
+    stretch_to_screen: bool,
     internal_gl_ins: Option<Box<dyn GLESContext>>,
     /// Cached `GL_VERSION / GL_VENDOR / GL_RENDERER` string of the internal
     /// OpenGL ES context, captured at window creation. Used to detect the host
@@ -1127,6 +1130,7 @@ impl Window {
             fullscreen,
             scale_hack,
             host_screen_size,
+            stretch_to_screen: options.stretch_to_screen,
             internal_gl_ins: None,
             gl_driver_description: String::new(),
             splash_image,
@@ -2558,6 +2562,14 @@ impl Window {
     /// The aspect ratio of this region always reflects the guest app's view of
     /// the world, but the scale and orientation might not.
     pub fn viewport(&self) -> (u32, u32, u32, u32) {
+        // "Stretch to fill screen": use the whole drawable. Touch input maps
+        // through this same rectangle, so it keeps lining up.
+        if self.stretch_to_screen {
+            let (screen_width, screen_height) = self.window.drawable_size();
+            if screen_width != 0 && screen_height != 0 {
+                return (0, 0, screen_width, screen_height);
+            }
+        }
         let (app_width, app_height) = size_for_orientation_from_size(
             self.screen_size(),
             self.device_orientation,
