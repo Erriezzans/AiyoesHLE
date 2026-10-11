@@ -191,10 +191,6 @@ pub struct Options {
     /// rotation turns the picture sideways; `--present-rotate=0` presents it
     /// as-is. `None` keeps the automatic behaviour.
     pub present_rotate: Option<u32>,
-    /// Use UIKit's actual autorotation transform when deciding whether to add
-    /// EAGL's 180-degree presentation compensation. Off by default to retain
-    /// the legacy iPad/non-portrait heuristic; opt in with `--rotation-fix`.
-    pub rotation_fix: bool,
     /// Force EAGL `initWithAPI:` to create an OpenGL ES 1.1 (fixed-function)
     /// context even when the app requested an OpenGL ES 2.0/3.x context.
     ///
@@ -260,11 +256,6 @@ pub struct Options {
     // TODO: flip to opt-out once track-switch/pause/reset handling is
     // validated against a real run of the game.
     pub gd_music_bypass: bool,
-    /// Enable the newer `MPMoviePlayerController` lifecycle and view
-    /// presentation behaviour with `--fix-movie-player`; the bundled defaults
-    /// enable it for GTA III. Off globally because some other games rely on
-    /// the legacy eager-load and automatic fullscreen presentation behaviour.
-    pub fix_movie_player: bool,
 }
 
 impl Default for Options {
@@ -317,7 +308,6 @@ impl Default for Options {
             prefer_gles2_context: false,
             mach_semaphore_spurious_wake_ms: None,
             present_rotate: None,
-            rotation_fix: false,
             force_gles1_context: std::env::var("TOUCHHLE_FORCE_GLES1_CONTEXT")
                 .map(|value| {
                     let value = value.trim();
@@ -355,7 +345,6 @@ impl Default for Options {
             gd_music_bypass: std::env::var_os("TOUCHHLE_GD_MUSIC_BYPASS")
                 .map(|value| value != "0")
                 .unwrap_or(false),
-            fix_movie_player: false,
         }
     }
 }
@@ -383,10 +372,6 @@ impl Options {
             self.stretch_to_screen = false;
         } else if arg == "--fix-music" {
             self.gd_music_bypass = true;
-        } else if arg == "--fix-movie-player" {
-            self.fix_movie_player = true;
-        } else if arg == "--no-fix-movie-player" {
-            self.fix_movie_player = false;
         } else if arg == "--landscape-left" {
             self.initial_orientation = DeviceOrientation::LandscapeLeft;
         } else if arg == "--landscape-right" {
@@ -600,10 +585,6 @@ impl Options {
                 return Err("Invalid value for --present-rotate= (expected 0, 90, 180 or 270)".to_string());
             }
             self.present_rotate = Some(deg);
-        } else if arg == "--rotation-fix" {
-            self.rotation_fix = true;
-        } else if arg == "--no-rotation-fix" {
-            self.rotation_fix = false;
         } else if arg == "--perf-hints" {
             self.perf_hints = true;
         } else if arg == "--no-perf-hints" {
@@ -745,7 +726,7 @@ fn parse_dump_options(options: &str) -> Result<DumpingOptions, String> {
 }
 
 #[cfg(test)]
-mod option_parsing_tests {
+mod force_composition_option_tests {
     use super::*;
 
     #[test]
@@ -758,29 +739,5 @@ mod option_parsing_tests {
 
         assert!(options.parse_argument("--no-force-composition").unwrap());
         assert!(!options.force_composition);
-    }
-
-    #[test]
-    fn fix_movie_player_is_opt_in_and_can_be_disabled() {
-        let mut options = Options::default();
-        assert!(!options.fix_movie_player);
-
-        assert!(options.parse_argument("--fix-movie-player").unwrap());
-        assert!(options.fix_movie_player);
-
-        assert!(options.parse_argument("--no-fix-movie-player").unwrap());
-        assert!(!options.fix_movie_player);
-    }
-
-    #[test]
-    fn rotation_fix_is_opt_in_and_can_be_disabled() {
-        let mut options = Options::default();
-        assert!(!options.rotation_fix);
-
-        assert!(options.parse_argument("--rotation-fix").unwrap());
-        assert!(options.rotation_fix);
-
-        assert!(options.parse_argument("--no-rotation-fix").unwrap());
-        assert!(!options.rotation_fix);
     }
 }

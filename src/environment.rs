@@ -1073,7 +1073,7 @@ impl Environment {
     /// do not need to be aware of the app picker's peculiarities, so it is
     /// cleaner than the alternative!
     pub fn new_without_app(
-        options: options::Options,
+        mut options: options::Options,
         icon: image::Image,
     ) -> Result<Environment, String> {
         // Enforces a one (real) Environment limit. See `with_yielder` for
@@ -1090,6 +1090,30 @@ impl Environment {
         let launch_image = None;
 
         assert!(!options.headless);
+
+        // The app picker (the launcher UI itself, not a game) should fill the
+        // host screen at its natural aspect ratio instead of being letterboxed
+        // as a fixed iPhone-shaped rectangle. Lay it out on a 320pt-wide
+        // virtual screen whose height follows the host display's aspect, so
+        // the picker's fixed-size icons and text keep their proportions. This
+        // only affects this picker Environment: the options a game is launched
+        // with are built separately, and the "Stretch to fill screen" setting
+        // remains a per-game option that is untouched here.
+        if options.host_screen_size.is_none() {
+            if let Some((w, h)) = window::host_screen_size() {
+                let (short, long) = (w.min(h), w.max(h));
+                let height = (320.0 * long as f32 / short as f32).round() as u32;
+                let height = height.max(480);
+                log!(
+                    "App picker: host screen is {}x{} px, using a 320x{} point picker screen.",
+                    w,
+                    h,
+                    height
+                );
+                options.host_screen_size = Some((320, height));
+            }
+        }
+
         let window = Some(Box::new(window::Window::new(
             &format!(
                 "touchHLE {}{}{}",
