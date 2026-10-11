@@ -118,7 +118,7 @@ jobs:
         ../gradle/gradle-8.11.1/bin/gradle assembleRelease
         APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
         echo "Found APK: $APK"
-        mv "$APK" ../HyperHLE-Fork.apk
+        mv "$APK" ../AiyoesHLE.apk
       env:
         HYPERHLE_KEYSTORE_B64: ${{ secrets.HYPERHLE_KEYSTORE_B64 }}
         HYPERHLE_KEYSTORE_PASSWORD: ${{ secrets.HYPERHLE_KEYSTORE_PASSWORD }}
@@ -129,7 +129,7 @@ jobs:
     - uses: actions/upload-artifact@main
       with:
         name: HyperHLE_Android_AArch64
-        path: HyperHLE-Fork.apk
+        path: AiyoesHLE.apk
 
   publish-android-release:
     needs: build-android
@@ -150,5 +150,5 @@ jobs:
           tag_name: android-${{ github.run_number }}
           name: HyperHLE Android build ${{ github.run_number }}
           body: Android (AArch64) build from commit ${{ github.sha }}.
-          files: release/HyperHLE-Fork.apk
+          files: release/AiyoesHLE.apk
           fail_on_unmatched_files: true
