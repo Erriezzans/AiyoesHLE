@@ -93,6 +93,9 @@ impl VsyncMode {
 #[derive(Clone)]
 pub struct Options {
     pub fullscreen: bool,
+    /// Stretch the app to fill the whole screen instead of keeping its own
+    /// aspect ratio (`--stretch-to-screen`).
+    pub stretch_to_screen: bool,
     pub device_family: Option<DeviceFamily>,
     pub auto_device_family: bool,
     /// When set, the guest sees a screen of exactly this size (in points) and
@@ -259,6 +262,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             fullscreen: false,
+            stretch_to_screen: false,
             trainer_disabled: true,
             device_family: None,
             auto_device_family: false,
@@ -362,6 +366,10 @@ impl Options {
 
         if arg == "--fullscreen" {
             self.fullscreen = true;
+        } else if arg == "--stretch-to-screen" {
+            self.stretch_to_screen = true;
+        } else if arg == "--no-stretch-to-screen" {
+            self.stretch_to_screen = false;
         } else if arg == "--fix-music" {
             self.gd_music_bypass = true;
         } else if arg == "--landscape-left" {
