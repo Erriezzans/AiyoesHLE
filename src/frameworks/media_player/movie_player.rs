@@ -10,17 +10,17 @@
 //! movies, then presents decoded frames through the Core Animation layer. The
 //! controller also reproduces Apple's asynchronous load and playback lifecycle.
 //!
-//! 1. `initWithContentURL:` stores the URL and creates the player view without
-//!    preparing the movie. `prepareToPlay` starts asynchronous loading, and
-//!    `play` prepares automatically if needed.
+//! 1. By default, `initWithContentURL:` starts the legacy asynchronous preload
+//!    sequence immediately. Pass `--fix-movie-player` to defer loading
+//!    until `prepareToPlay` or `play`, matching the behavior that fixes GTA III.
 //! 2. Once the content is determined playable, the player posts
 //!    `MPMoviePlayerLoadStateDidChangeNotification`, followed by
 //!    `MPMovieNaturalSizeAvailableNotification` and
 //!    `MPMovieDurationAvailableNotification`.
-//! 3. `readyForDisplay` remains false until a decoded video frame is presented.
-//!    The player then sets it to true and posts
-//!    `MPMoviePlayerReadyForDisplayDidChangeNotification`. Audio-only or
-//!    undecodable movies never become ready for display.
+//! 3. In legacy mode, `readyForDisplay` also becomes true after metadata loads
+//!    when there is no supported video track. With the movie-player fix enabled
+//!    it remains false until a decoded video frame is presented; the movie view
+//!    stays hidden until then and is not automatically presented fullscreen.
 //! 4. For backwards compatibility with apps written against the
 //!    `MPMoviePlayerController` introduced in iPhone OS 2 the player also
 //!    posts the (now deprecated) `MPMoviePlayerContentPreloadDidFinishNotification`.
@@ -46,7 +46,8 @@ use crate::frameworks::foundation::{ns_string, ns_url, NSInteger, NSUInteger};
 use crate::frameworks::uikit::ui_device::UIDeviceOrientation;
 use crate::mem::MutPtr;
 use crate::objc::{
-    id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
+    id, msg, msg_class, msg_super, nil, objc_classes, release, retain, ClassExports, HostObject,
+    NSZonePtr,
 };
 use crate::Environment;
 use std::collections::{HashMap, VecDeque};
@@ -126,6 +127,12 @@ pub struct State {
     /// Video decoders for players that are currently playing (see
     /// [super::movie_video]).
     videos: HashMap<id, MovieVideo>,
+    /// The `MPMoviePlayerController` owned by each live
+    /// `MPMoviePlayerViewController` (its `moviePlayer` property). Each value
+    /// is retained and released when the view controller is deallocated.
+    /// `UIViewController`'s host object is shared with every subclass, so the
+    /// link lives here rather than in a host-object field.
+    view_controller_players: HashMap<id, id>,
 }
 impl State {
     fn get(env: &mut Environment) -> &mut Self {
@@ -308,6 +315,10 @@ struct MPMoviePlayerControllerHostObject {
     content_url: id,
     // UIView *
     view: id,
+    /// The temporary fullscreen presenter used by the legacy behavior for an
+    /// unparented movie view. The opt-in GTA III path keeps the view in the
+    /// app's hierarchy instead.
+    presentation_view_controller: id,
     background_view: id,
     audio_player: id,
 
@@ -318,7 +329,13 @@ struct MPMoviePlayerControllerHostObject {
     source_type: MPMovieSourceType,
     repeat_mode: MPMovieRepeatMode,
     should_autoplay: bool,
+    /// `initialPlaybackTime`: where a play run that starts from the stopped
+    /// state begins, in seconds. Negative (the default, -1) means "from the
+    /// natural start of the movie".
     initial_playback_time: f64,
+    /// `endPlaybackTime`: where playback ends, in seconds. Negative (the
+    /// default, -1) means "at the natural end of the movie".
+    end_playback_time: f64,
     playback_state: MPMoviePlaybackState,
     load_state: MPMovieLoadState,
     /// Natural dimensions reported by the supported H.264 video track.
@@ -326,6 +343,9 @@ struct MPMoviePlayerControllerHostObject {
     /// Placeholder dimensions used when the movie has no supported video track.
     natural_size: CGSize,
     duration: f64,
+    /// `true` once `duration` holds the movie's real (encoded) duration
+    /// rather than [PLACEHOLDER_DURATION].
+    duration_known: bool,
     /// Playback clock: position (seconds) accumulated before the current
     /// play run, and when the current run started (`None` unless playing).
     /// We can't decode the video, but apps still time their UI against
@@ -425,20 +445,56 @@ pub(super) fn read_mp4_duration<F: Read + Seek>(file: &mut F) -> Option<f64> {
     }
 }
 
+/// The explicit `endPlaybackTime`, if one is set and lies inside the movie.
+///
+/// Per Apple's `MPMoviePlayerController` reference, `endPlaybackTime` is "the
+/// end time (measured in seconds) for playback of the movie"; the default,
+/// -1, plays to the natural end. An end time at or past the movie's known
+/// duration is the same as the natural end.
+fn explicit_end_time(host: &MPMoviePlayerControllerHostObject) -> Option<f64> {
+    let end = host.end_playback_time;
+    if !end.is_finite() || end <= 0.0 {
+        return None;
+    }
+    if host.duration_known && host.duration > 0.0 && end >= host.duration {
+        return None;
+    }
+    Some(end)
+}
+
+/// Where the current play-through stops: the explicit `endPlaybackTime` if
+/// set, otherwise the movie's duration.
+fn effective_end_time(host: &MPMoviePlayerControllerHostObject) -> f64 {
+    explicit_end_time(host).unwrap_or(host.duration)
+}
+
 /// Current position of the player's playback clock, in seconds. Wraps around
-/// for `MPMovieRepeatModeOne`, otherwise stops at the end of the movie.
+/// for `MPMovieRepeatModeOne`, otherwise stops at the end of the movie (or at
+/// `endPlaybackTime`, if set).
 fn playback_position(host: &MPMoviePlayerControllerHostObject) -> f64 {
     let elapsed = host
         .clock_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64());
     let position = host.clock_offset + elapsed;
-    if host.duration <= 0.0 {
+    if host.duration <= 0.0 && explicit_end_time(host).is_none() {
         position
     } else if host.repeat_mode == MPMovieRepeatModeOne {
-        position % host.duration
+        // The video decoder loops over the whole file, so the clock has to
+        // as well; `endPlaybackTime` only ends non-repeating playback.
+        if host.duration > 0.0 {
+            position % host.duration
+        } else {
+            position
+        }
     } else {
-        position.min(host.duration)
+        position.min(effective_end_time(host))
     }
+}
+
+/// Whether to use the opt-in movie-player behavior that fixes GTA III while
+/// preserving the legacy lifecycle for other games by default.
+fn fix_movie_player_enabled(env: &Environment) -> bool {
+    env.options.fix_movie_player
 }
 
 /// Ensure the player has a valid dummy view, creating one lazily if needed.
@@ -453,7 +509,9 @@ fn ensure_view(env: &mut Environment, this: id) -> id {
     }
     let view_alloc: id = msg_class![env; UIView alloc];
     let view: id = msg![env; view_alloc init];
-    () = msg![env; view setHidden:true];
+    if fix_movie_player_enabled(env) {
+        () = msg![env; view setHidden:true];
+    }
     retain(env, view);
     env.objc
         .borrow_mut::<MPMoviePlayerControllerHostObject>(this)
@@ -476,6 +534,128 @@ fn ensure_background_view(env: &mut Environment, this: id) -> id {
         .borrow_mut::<MPMoviePlayerControllerHostObject>(this)
         .background_view = view;
     view
+}
+
+/// Reproduce the legacy behavior for movies whose view has not been attached
+/// by the app: add it to the app window and present it fullscreen on the first
+/// decoded frame. The GTA III opt-in path deliberately does not do this.
+fn present_unparented_movie_view(env: &mut Environment, player: id, view: id) {
+    if view == nil {
+        return;
+    }
+    let superview: id = msg![env; view superview];
+    if superview != nil {
+        return;
+    }
+    let presentation_view_controller = env
+        .objc
+        .borrow::<MPMoviePlayerControllerHostObject>(player)
+        .presentation_view_controller;
+    if presentation_view_controller != nil {
+        return;
+    }
+
+    let app: id = msg_class![env; UIApplication sharedApplication];
+    let mut window: id = msg![env; app keyWindow];
+    if window == nil {
+        let windows = env.framework_state.uikit.ui_view.ui_window.windows.clone();
+        for candidate in windows.into_iter().rev() {
+            let hidden: bool = msg![env; candidate isHidden];
+            if !hidden {
+                window = candidate;
+                break;
+            }
+        }
+    }
+    if window == nil {
+        return;
+    }
+
+    let mut presenter: id = msg![env; window rootViewController];
+    if presenter == nil {
+        let content_view: id = msg![env; window contentView];
+        if content_view != nil {
+            let candidate: id = msg![env; content_view nextResponder];
+            let view_controller_class: id = msg_class![env; UIViewController class];
+            if candidate != nil && msg![env; candidate isKindOfClass:view_controller_class] {
+                presenter = candidate;
+            }
+        }
+    }
+    if presenter != nil {
+        for _ in 0..16 {
+            let presented: id = msg![env; presenter presentedViewController];
+            if presented == nil {
+                break;
+            }
+            presenter = presented;
+        }
+    }
+
+    let bounds: CGRect = msg![env; window bounds];
+    if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+        return;
+    }
+    let controller_alloc: id = msg_class![env; UIViewController alloc];
+    let controller: id = msg![env; controller_alloc init];
+    () = msg![env; controller setView:view];
+    () = msg![env; view setFrame:bounds];
+    let resize_mask: NSUInteger = (1 << 1) | (1 << 4);
+    () = msg![env; view setAutoresizingMask:resize_mask];
+
+    if presenter != nil {
+        () = msg![env; presenter presentModalViewController:controller animated:false];
+    }
+    let mut superview: id = msg![env; view superview];
+    if superview == nil {
+        () = msg![env; window addSubview:view];
+        superview = msg![env; view superview];
+    }
+    if superview == nil {
+        () = msg![env; controller setView:nil];
+        release(env, controller);
+        return;
+    }
+
+    env.objc
+        .borrow_mut::<MPMoviePlayerControllerHostObject>(player)
+        .presentation_view_controller = controller;
+    log!(
+        "MPMoviePlayerController {:?}: presenting unparented movie view fullscreen",
+        player
+    );
+}
+
+fn dismiss_unparented_movie_view(env: &mut Environment, player: id) {
+    let (controller, view) = {
+        let host = env
+            .objc
+            .borrow_mut::<MPMoviePlayerControllerHostObject>(player);
+        (
+            std::mem::replace(&mut host.presentation_view_controller, nil),
+            host.view,
+        )
+    };
+    if controller == nil {
+        return;
+    }
+
+    let presenter: id = msg![env; controller presentingViewController];
+    let presented: id = if presenter != nil {
+        msg![env; presenter presentedViewController]
+    } else {
+        nil
+    };
+    if presenter != nil && presented == controller {
+        () = msg![env; presenter dismissModalViewControllerAnimated:false];
+    } else if view != nil {
+        let superview: id = msg![env; view superview];
+        if superview != nil {
+            () = msg![env; view removeFromSuperview];
+        }
+    }
+    () = msg![env; controller setView:nil];
+    release(env, controller);
 }
 
 fn clear_movie_frame(env: &mut Environment, player: id) {
@@ -539,12 +719,15 @@ fn schedule_playback_finish(
 ) {
     let finish_at = {
         let host = env.objc.borrow::<MPMoviePlayerControllerHostObject>(player);
+        let end = effective_end_time(host);
+        // An explicit `endPlaybackTime` is honoured even when we can't decode
+        // the video track: the app asked for playback to stop at that time.
         if use_media_duration
-            && host.video_info.is_some()
-            && host.duration.is_finite()
-            && host.duration > 0.0
+            && (host.video_info.is_some() || explicit_end_time(host).is_some())
+            && end.is_finite()
+            && end > 0.0
         {
-            let remaining = (host.duration - playback_position(host))
+            let remaining = (end - playback_position(host))
                 .max(0.0)
                 .min(31_536_000.0);
             start_at + Duration::from_secs_f64(remaining)
@@ -619,9 +802,11 @@ fn schedule_preload_sequence(env: &mut Environment, this: id) {
                     path.as_str(),
                     duration
                 );
-                env.objc
-                    .borrow_mut::<MPMoviePlayerControllerHostObject>(this)
-                    .duration = duration;
+                let host = env
+                    .objc
+                    .borrow_mut::<MPMoviePlayerControllerHostObject>(this);
+                host.duration = duration;
+                host.duration_known = true;
             }
             if let Some(info) = MovieVideo::probe(&bytes) {
                 log_dbg!(
@@ -688,6 +873,16 @@ fn schedule_preload_sequence(env: &mut Environment, this: id) {
         PendingNotification::DurationAvailable(this),
         metadata_at,
     );
+    if !video_supported && !fix_movie_player_enabled(env) {
+        env.objc
+            .borrow_mut::<MPMoviePlayerControllerHostObject>(this)
+            .ready_for_display = true;
+        enqueue(
+            env,
+            PendingNotification::ReadyForDisplayChange(this),
+            metadata_at,
+        );
+    }
 
     // Legacy `ContentPreloadDidFinish` (iPhone OS 2 API).
     enqueue(
@@ -715,7 +910,17 @@ fn schedule_playback(env: &mut Environment, this: id, start_at: Instant) {
         let host = env
             .objc
             .borrow_mut::<MPMoviePlayerControllerHostObject>(this);
+        let starting_from_stop = host.playback_state == MPMoviePlaybackStateStopped
+            && host.clock_started.is_none();
         host.playback_state = MPMoviePlaybackStatePlaying;
+        if starting_from_stop
+            && host.initial_playback_time.is_finite()
+            && host.initial_playback_time > 0.0
+        {
+            // `initialPlaybackTime`: "The time, specified in seconds within
+            // the video timeline, when playback should start."
+            host.clock_offset = host.initial_playback_time;
+        }
         if host.clock_started.is_none() {
             host.clock_started = Some(start_at);
         }
@@ -744,6 +949,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = Box::new(MPMoviePlayerControllerHostObject {
         content_url: nil,
         view: nil,
+        presentation_view_controller: nil,
         background_view: nil,
         audio_player: nil,
 
@@ -756,11 +962,13 @@ pub const CLASSES: ClassExports = objc_classes! {
         should_autoplay: true,
 
         initial_playback_time: -1.0,
+        end_playback_time: -1.0,
         playback_state: MPMoviePlaybackStateStopped,
         load_state: MPMovieLoadStateUnknown,
         video_info: None,
         natural_size: PLACEHOLDER_NATURAL_SIZE,
         duration: PLACEHOLDER_DURATION,
+        duration_known: false,
         clock_offset: 0.0,
         clock_started: None,
         ready_for_display: false,
@@ -789,6 +997,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     ensure_view(env, this);
     ensure_background_view(env, this);
 
+    if !fix_movie_player_enabled(env) {
+        // Legacy behavior: loading starts as soon as the controller is created.
+        schedule_preload_sequence(env, this);
+    }
+
     this
 }
 
@@ -802,9 +1015,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     cancel_pending_playback_finish(env, this);
     State::get(env).videos.remove(&this);
-    clear_movie_frame(env, this);
-    set_movie_view_hidden(env, this, true);
+    let use_movie_player_fix = fix_movie_player_enabled(env);
+    if use_movie_player_fix {
+        clear_movie_frame(env, this);
+        set_movie_view_hidden(env, this, true);
+    }
     stop_movie_audio(env, this);
+    if !use_movie_player_fix {
+        dismiss_unparented_movie_view(env, this);
+    }
 
     let (old_url, was_preloaded) = {
         let host = env
@@ -815,6 +1034,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         host.video_info = None;
         host.natural_size = PLACEHOLDER_NATURAL_SIZE;
         host.duration = PLACEHOLDER_DURATION;
+        host.duration_known = false;
         host.clock_offset = 0.0;
         host.clock_started = None;
         host.preload_scheduled = false;
@@ -841,9 +1061,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())dealloc {
     State::get(env).videos.remove(&this);
-    clear_movie_frame(env, this);
-    set_movie_view_hidden(env, this, true);
+    let use_movie_player_fix = fix_movie_player_enabled(env);
+    if use_movie_player_fix {
+        clear_movie_frame(env, this);
+        set_movie_view_hidden(env, this, true);
+    }
     stop_movie_audio(env, this);
+    if !use_movie_player_fix {
+        dismiss_unparented_movie_view(env, this);
+    }
 
     // No need to drain pending notifications: each pending entry holds a
     // +1 retain on the player, so dealloc can only run once all queued
@@ -955,17 +1181,26 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)isFullscreen {
-    env.objc
-        .borrow::<MPMoviePlayerControllerHostObject>(this)
-        .fullscreen
+    if fix_movie_player_enabled(env) {
+        env.objc
+            .borrow::<MPMoviePlayerControllerHostObject>(this)
+            .fullscreen
+    } else {
+        // The legacy implementation had no explicit fullscreen state.
+        false
+    }
 }
 
 - (())setFullscreen:(bool)fullscreen {
-    set_movie_fullscreen(env, this, fullscreen);
+    if fix_movie_player_enabled(env) {
+        set_movie_fullscreen(env, this, fullscreen);
+    }
 }
 
 - (())setFullscreen:(bool)fullscreen animated:(bool)_animated {
-    set_movie_fullscreen(env, this, fullscreen);
+    if fix_movie_player_enabled(env) {
+        set_movie_fullscreen(env, this, fullscreen);
+    }
 }
 
 // --- View ---
@@ -1043,6 +1278,26 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc
         .borrow_mut::<MPMoviePlayerControllerHostObject>(this)
         .initial_playback_time = time;
+}
+
+- (f64)endPlaybackTime {
+    env.objc
+        .borrow::<MPMoviePlayerControllerHostObject>(this)
+        .end_playback_time
+}
+- (())setEndPlaybackTime:(f64)time {
+    let playing = {
+        let host = env.objc.borrow_mut::<MPMoviePlayerControllerHostObject>(this);
+        host.end_playback_time = time;
+        host.playback_state == MPMoviePlaybackStatePlaying
+    };
+    // If the movie is already playing, move the pending end-of-playback to
+    // the new end time (or back to the natural end for a negative value).
+    if playing {
+        let start_at = Instant::now();
+        cancel_pending_playback_finish(env, this);
+        schedule_playback_finish(env, this, start_at, true);
+    }
 }
 
 - (f64)duration {
@@ -1125,9 +1380,15 @@ pub const CLASSES: ClassExports = objc_classes! {
         host.playback_state = MPMoviePlaybackStateStopped;
     }
     State::get(env).videos.remove(&this);
-    clear_movie_frame(env, this);
-    set_movie_view_hidden(env, this, true);
+    let use_movie_player_fix = fix_movie_player_enabled(env);
+    if use_movie_player_fix {
+        clear_movie_frame(env, this);
+        set_movie_view_hidden(env, this, true);
+    }
     enqueue(env, PendingNotification::PlaybackStateChange(this), Instant::now());
+    if !use_movie_player_fix {
+        dismiss_unparented_movie_view(env, this);
+    }
     if env
         .framework_state
         .media_player
@@ -1159,21 +1420,38 @@ pub const CLASSES: ClassExports = objc_classes! {
     // https://developer.apple.com/documentation/mediaplayer/mpmovieplayerviewcontroller
     let player: id = msg_class![env; MPMoviePlayerController alloc];
     let player: id = msg![env; player initWithContentURL:url];
-    // Store as associated value via a dynamic property slot.
-    // We use setValue:forKey: with a special key.
-    let key = ns_string::get_static_str(env, "_touchHLE_moviePlayer");
-    () = msg![env; this setValue:player forKey:key];
-    release(env, player); // setValue:forKey: retains
+    // The +1 reference from alloc/init is owned by the view controller and
+    // given up in -dealloc. This deliberately isn't stored through KVC: an
+    // app subclass has no setter for a private key, so KVC would fall back
+    // to its never-freed dynamic storage (and warn about it).
+    if this != nil {
+        let old = State::get(env).view_controller_players.insert(this, player);
+        if let Some(old) = old {
+            release(env, old);
+        }
+    } else {
+        release(env, player);
+    }
 
     this
+}
+
+- (())dealloc {
+    if let Some(player) = State::get(env).view_controller_players.remove(&this) {
+        release(env, player);
+    }
+    msg_super![env; this dealloc]
 }
 
 // Apple docs: "The movie player controller object used to present the movie."
 // @property(nonatomic, readonly) MPMoviePlayerController *moviePlayer
 // https://developer.apple.com/documentation/mediaplayer/mpmovieplayerviewcontroller/1619165-movieplayer
 - (id)moviePlayer {
-    let key = ns_string::get_static_str(env, "_touchHLE_moviePlayer");
-    msg![env; this valueForKey:key]
+    State::get(env)
+        .view_controller_players
+        .get(&this)
+        .copied()
+        .unwrap_or(nil)
 }
 
 - (())viewDidLoad {
@@ -1366,22 +1644,30 @@ fn set_view_frame_if_needed(env: &mut Environment, view: id, frame: CGRect) {
 }
 
 fn update_movie_view_frame(env: &mut Environment, player: id, view: id) {
+    let use_movie_player_fix = fix_movie_player_enabled(env);
     let (video_info, scaling_mode, fullscreen, has_original_frame) = {
         let host = env.objc.borrow::<MPMoviePlayerControllerHostObject>(player);
         (
             host.video_info,
             host.scaling_mode,
-            host.fullscreen,
-            host.fullscreen_original_frame.is_some(),
+            if use_movie_player_fix {
+                host.fullscreen
+            } else {
+                host.presentation_view_controller != nil
+            },
+            use_movie_player_fix && host.fullscreen_original_frame.is_some(),
         )
     };
+    if !use_movie_player_fix && video_info.is_none() {
+        return;
+    }
     let parent: id = msg![env; view superview];
     if parent == nil {
         return;
     }
     let bounds: CGRect = msg![env; parent bounds];
     if fullscreen {
-        if !has_original_frame {
+        if use_movie_player_fix && !has_original_frame {
             let original_frame: CGRect = msg![env; view frame];
             env.objc
                 .borrow_mut::<MPMoviePlayerControllerHostObject>(player)
@@ -1431,6 +1717,7 @@ fn update_movie_view_frame(env: &mut Environment, player: id, view: id) {
 
 /// Show the latest decoded frame of each playing movie in its player's view.
 fn present_video_frames(env: &mut Environment) {
+    let use_movie_player_fix = fix_movie_player_enabled(env);
     let players: Vec<id> = State::get(env).videos.keys().copied().collect();
     let mut frames = Vec::new();
     for player in players {
@@ -1456,8 +1743,16 @@ fn present_video_frames(env: &mut Environment) {
         if view == nil {
             continue;
         }
+        if !use_movie_player_fix {
+            present_unparented_movie_view(env, player, view);
+            let superview: id = msg![env; view superview];
+            if superview == nil {
+                continue;
+            }
+        }
         update_movie_view_frame(env, player, view);
         let layer: id = msg![env; view layer];
+        let pts = frame.pts;
         crate::frameworks::core_animation::ca_eagl_layer::present_pixels(
             env,
             layer,
@@ -1476,13 +1771,22 @@ fn present_video_frames(env: &mut Environment) {
                 true
             }
         };
-        set_movie_view_hidden(env, player, false);
+        if use_movie_player_fix {
+            set_movie_view_hidden(env, player, false);
+        }
         if became_ready {
             enqueue(
                 env,
                 PendingNotification::ReadyForDisplayChange(player),
                 Instant::now(),
             );
+            if !use_movie_player_fix {
+                log!(
+                    "MPMoviePlayerController {:?}: first video frame presented at {:.3}s",
+                    player,
+                    pts
+                );
+            }
         }
     }
 }
@@ -1541,6 +1845,7 @@ pub(super) fn handle_players(env: &mut Environment) {
         // For PlaybackDidFinish we must update playbackState BEFORE posting,
         // so observers that read [player playbackState] see Stopped.
         if matches!(notif, PendingNotification::PlaybackDidFinish { .. }) {
+            let use_movie_player_fix = fix_movie_player_enabled(env);
             let host = env
                 .objc
                 .borrow_mut::<MPMoviePlayerControllerHostObject>(player);
@@ -1549,9 +1854,14 @@ pub(super) fn handle_players(env: &mut Environment) {
             host.clock_started = None;
             host.finish_scheduled = false;
             State::get(env).videos.remove(&player);
-            clear_movie_frame(env, player);
-            set_movie_view_hidden(env, player, true);
+            if use_movie_player_fix {
+                clear_movie_frame(env, player);
+                set_movie_view_hidden(env, player, true);
+            }
             stop_movie_audio(env, player);
+            if !use_movie_player_fix {
+                dismiss_unparented_movie_view(env, player);
+            }
         }
 
         if matches!(notif, PendingNotification::PlaybackStateChange(_)) {
