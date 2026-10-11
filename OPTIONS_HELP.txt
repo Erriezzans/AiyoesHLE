@@ -425,6 +425,14 @@ Other options:
         should NOT enable this flag, because real ES 2.0 has no fixed-function
         pipeline.
 
+    --stretch-to-screen
+        Stretch the app to fill the whole screen, instead of keeping its original
+        aspect ratio with black bars around it. The picture is distorted if
+        the screen's shape differs from the app's. Touch input still lines up.
+
+    --no-stretch-to-screen
+        Turns --stretch-to-screen off again.
+
     --allow-network-access
         Allow apps running in touchHLE to access the Internet and the local network.
 
