@@ -31,108 +31,151 @@ import java.io.InputStream;
 
 public class MainActivity extends SDLActivity {
     private static final String TAG = "touchHLE";
+
+    // ---------------------------------------------------------------------
+    // Android back gesture / back button menu.
+    // SDLActivity forwards the back key to native code and swallows it, so
+    // the key has to be intercepted in dispatchKeyEvent before SDL sees it.
+    //
+    // On the game list: asks whether to exit the app.
+    // In a game: pauses the game and offers Resume / Back to game list /
+    // Exit app.
+    // ---------------------------------------------------------------------
+
+    // Implemented in Rust (src/lib.rs): true once a game has been picked.
+    private static native boolean nativeIsGameRunning();
+
+    private boolean exitDialogShowing = false;
     private android.app.AlertDialog backDialog = null;
+    private boolean pausedByBackMenu = false;
+    private boolean leavingForRestart = false;
 
-    // Set by Rust (see window.rs notify_game_started) once the user has picked
-    // a game in the app picker. false = the menu is showing.
-    private static volatile boolean inGame = false;
-    // Must match window.rs GAME_STATE_COMMAND.
-    private static final int MSG_GAME_STATE = 0x8002;
+    private boolean isGameRunning() {
+        try {
+            return nativeIsGameRunning();
+        } catch (Throwable t) {
+            Log.w(TAG, "Couldn't query game state", t);
+            return false;
+        }
+    }
 
-    // When true, the process is killed at the end of onDestroy so the next
-    // launch starts with clean native state (the emulator keeps global state
-    // that isn't safe to reuse after the activity is recreated).
-    private boolean killProcessOnDestroy = false;
+    // Freeze the emulator the same way SDL does when the app goes to the
+    // background, so the game doesn't keep running behind the menu.
+    private void pauseForBackMenu() {
+        if (pausedByBackMenu) return;
+        try {
+            nativePause();
+            pausedByBackMenu = true;
+        } catch (Throwable t) {
+            Log.w(TAG, "Couldn't pause for back menu", t);
+        }
+    }
+
+    private void resumeAfterBackMenu() {
+        if (!pausedByBackMenu) return;
+        pausedByBackMenu = false;
+        try {
+            nativeResume();
+        } catch (Throwable t) {
+            Log.w(TAG, "Couldn't resume after back menu", t);
+        }
+    }
+
+    // Kill this process and start the app again from the game list. A helper
+    // activity in a separate process does the killing and relaunching.
+    private void restartToGameList() {
+        leavingForRestart = true;
+        try {
+            Intent next = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            Intent restart = new Intent(this, RestartActivity.class);
+            restart.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            restart.putExtra("next", next);
+            restart.putExtra("pid", android.os.Process.myPid());
+            startActivity(restart);
+        } catch (Throwable t) {
+            leavingForRestart = false;
+            Log.e(TAG, "Couldn't restart to game list", t);
+        }
+    }
+
+    private void showBackMenu() {
+        if (exitDialogShowing) return;
+        exitDialogShowing = true;
+        final boolean inGame = isGameRunning();
+        try {
+            android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this,
+                    android.R.style.Theme_DeviceDefault_Dialog_Alert);
+            b.setTitle("HyperHLE");
+            if (inGame) {
+                pauseForBackMenu();
+                b.setItems(new CharSequence[]{"Resume", "Back to game list", "Exit app"},
+                    new android.content.DialogInterface.OnClickListener() {
+                        public void onClick(android.content.DialogInterface d, int which) {
+                            if (which == 1) {
+                                restartToGameList();
+                            } else if (which == 2) {
+                                finishAffinity();
+                            }
+                        }
+                    });
+            } else {
+                b.setMessage("Exit HyperHLE?");
+                b.setPositiveButton("Exit",
+                    new android.content.DialogInterface.OnClickListener() {
+                        public void onClick(android.content.DialogInterface d, int which) {
+                            finishAffinity();
+                        }
+                    });
+                b.setNegativeButton("Cancel", null);
+            }
+            b.setOnDismissListener(
+                new android.content.DialogInterface.OnDismissListener() {
+                    public void onDismiss(android.content.DialogInterface d) {
+                        exitDialogShowing = false;
+                        backDialog = null;
+                        if (!leavingForRestart) {
+                            resumeAfterBackMenu();
+                        }
+                    }
+                });
+            backDialog = b.show();
+        } catch (Exception e) {
+            exitDialogShowing = false;
+            backDialog = null;
+            resumeAfterBackMenu();
+            Log.e(TAG, "Couldn't show back menu", e);
+        }
+    }
 
     @Override
     public void onBackPressed() {
-        // Ask the dialog itself whether it is still up, instead of trusting a
-        // flag that could get stuck and silently swallow every swipe.
-        if (backDialog != null && backDialog.isShowing()) return;
-        // TEMPORARY diagnostic: proves the swipe reached this method.
-        android.widget.Toast.makeText(this,
-                inGame ? "back: game" : "back: menu",
-                android.widget.Toast.LENGTH_SHORT).show();
-        try {
-            if (inGame) {
-                showGameBackDialog();
-            } else {
-                showMenuBackDialog();
+        showBackMenu();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == android.view.KeyEvent.ACTION_UP
+                    && !event.isCanceled()) {
+                showBackMenu();
             }
-        } catch (Throwable t) {
-            Log.e(TAG, "Back dialog failed", t);
-            android.widget.Toast.makeText(this,
-                    "dialog error: " + t, android.widget.Toast.LENGTH_LONG).show();
+            return true;
         }
+        return super.dispatchKeyEvent(event);
     }
 
-    // In the app picker menu there is nothing to "resume", so just confirm
-    // that the user wants to leave the app.
-    private void showMenuBackDialog() {
-        backDialog = new android.app.AlertDialog.Builder(this,
-                android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("HyperHLE")
-            .setMessage("Exit HyperHLE?")
-            .setPositiveButton("Exit",
-                new android.content.DialogInterface.OnClickListener() {
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        exitApp();
-                    }
-                })
-            .setNegativeButton("Cancel", null)
-            .show();
-    }
-
-    // In a game: offer to go back to the game list without closing the whole
-    // app. The emulator pauses by itself while this dialog is up: SDL pauses
-    // the native thread when the activity window loses focus (and the guest
-    // app gets applicationWillResignActive), and resumes it when the dialog
-    // closes. That is the same mechanism the original Resume/Exit dialog used.
-    private void showGameBackDialog() {
-        backDialog = new android.app.AlertDialog.Builder(this,
-                android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Game paused")
-            .setItems(new CharSequence[]{"Resume", "Back to menu", "Exit app"},
-                new android.content.DialogInterface.OnClickListener() {
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        if (which == 1) {
-                            returnToMenu();
-                        } else if (which == 2) {
-                            exitApp();
-                        }
-                    }
-                })
-            .show();
-    }
-
-    private void exitApp() {
-        killProcessOnDestroy = true;
-        finish();
-    }
-
-    // The emulator can't safely run a second app in the same process, so
-    // "back to menu" = cleanly quit this one and start a fresh process, which
-    // opens straight into the app picker (SDL_main always starts the picker).
-    private void returnToMenu() {
-        try {
-            Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
-            if (launch == null) {
-                exitApp();
-                return;
+    @Override
+    protected void onPause() {
+        // If the app goes to the background, close the menu first so our own
+        // pause is undone before SDL does its normal pause.
+        if (backDialog != null) {
+            try {
+                backDialog.dismiss();
+            } catch (Exception e) {
+                // Nothing to do.
             }
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            Intent helper = new Intent();
-            helper.setClassName(this, "org.touchhle.android.RestartActivity");
-            helper.putExtra("next_intent", launch);
-            helper.putExtra("old_pid", android.os.Process.myPid());
-            helper.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(helper);
-            killProcessOnDestroy = true;
-            finish();
-        } catch (Exception e) {
-            Log.e(TAG, "Couldn't return to menu", e);
-            exitApp();
         }
+        super.onPause();
     }
 
     // Public accessor for SDLActivity's protected static mSingleton, so
@@ -150,25 +193,6 @@ public class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // TEMPORARY diagnostic: proves this build is the one installed.
-        android.widget.Toast.makeText(this, "back-fix build v3",
-                android.widget.Toast.LENGTH_SHORT).show();
-        // Android 13+ delivers the back gesture through the back-invoked
-        // dispatcher. Register explicitly so the swipe always reaches
-        // onBackPressed(), whatever the app's target SDK / opt-in state.
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            try {
-                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    new android.window.OnBackInvokedCallback() {
-                        public void onBackInvoked() {
-                            onBackPressed();
-                        }
-                    });
-            } catch (Throwable t) {
-                Log.w(TAG, "Couldn't register back callback", t);
-            }
-        }
         // Acquire the multicast lock here (not just declare it): Android
         // Wi-Fi drivers drop multicast unless the app holds it, which broke
         // Bonjour/NSNetService LAN discovery (GameKit, Gameloft games).
@@ -199,12 +223,7 @@ public class MainActivity extends SDLActivity {
         } catch (Exception e) {
             Log.w(TAG, "Couldn't release Wi-Fi multicast lock", e);
         }
-        // SDLActivity.onDestroy quits and joins the emulator thread, so the
-        // game has been shut down gracefully before we get to the kill.
         super.onDestroy();
-        if (killProcessOnDestroy) {
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
     }
 
     // Message ID sent from the Rust app picker (see window.rs) to open the
@@ -513,10 +532,6 @@ public class MainActivity extends SDLActivity {
             });
             return true;
         }
-        if (message == MSG_GAME_STATE) {
-            inGame = (data instanceof Integer) && ((Integer) data) != 0;
-            return true;
-        }
         // MSG_WEB_OVERLAY (0x8001) is reserved: native code notifies the
         // emulated app about page loads itself (via NSTimer), so there is
         // nothing to handle here yet.
@@ -526,7 +541,9 @@ public class MainActivity extends SDLActivity {
     private void openIpaPicker() {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
+        // No MIME-type filter: phones label .ipa files with many different
+        // types, and a filter greys them out. The .ipa extension is added
+        // to the copied file's name in onActivityResult if it's missing.
         intent.setType("*/*");
         try {
             startActivityForResult(
