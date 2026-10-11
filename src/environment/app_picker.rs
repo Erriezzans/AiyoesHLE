@@ -581,15 +581,19 @@ fn app_picker_inner(
         let image: id = msg_class![env; UIImage imageWithCGImage:image];
         let wallpaper: id = msg_class![env; UIImageView alloc];
         let wallpaper: id = msg![env; wallpaper initWithImage:image];
+        // Cover the whole screen, including the status-bar strip above
+        // `applicationFrame`, and sit behind `main_view`, so there is no black
+        // bar at the top of the picker.
         () = msg![env; wallpaper setFrame:(CGRect {
             origin: CGPoint {
                 x: 0.0,
                 y: 0.0,
             },
-            size: app_frame.size,
+            size: bounds.size,
         })];
         () = msg![env; wallpaper setAlpha:(0.5 as CGFloat)];
-        () = msg![env; main_view addSubview:wallpaper];
+        () = msg![env; window addSubview:wallpaper];
+        () = msg![env; window sendSubviewToBack:wallpaper];
         have_wallpaper = true;
         break;
     }
