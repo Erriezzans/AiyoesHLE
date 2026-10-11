@@ -236,6 +236,151 @@ unsafe fn host_extension_present(name: &str) -> bool {
     s.split(' ').any(|ext| ext == name)
 }
 
+const GL_TEXTURE0: GLenum = 0x84C0;
+const GL_CLIENT_ACTIVE_TEXTURE: GLenum = 0x84E1;
+const GL_MAX_TEXTURE_UNITS: GLenum = 0x84E2;
+const GL_TEXTURE_COORD_ARRAY: GLenum = 0x8078;
+
+/// Whether `glTexEnv*(GL_TEXTURE_FILTER_CONTROL_EXT, GL_TEXTURE_LOD_BIAS_EXT,
+/// ..)` is something the host driver understands. iOS games call this
+/// unconditionally; Adreno's ES 1.1 driver does not advertise
+/// `GL_EXT_texture_lod_bias` and answers with `GL_INVALID_ENUM`. Must be called
+/// with a current GL context; the answer is cached because it can't change.
+unsafe fn host_supports_lod_bias_texenv() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| host_extension_present("GL_EXT_texture_lod_bias"))
+}
+
+/// True if this `glTexEnv*` call must be dropped because the host driver
+/// would reject it (see [host_supports_lod_bias_texenv]).
+unsafe fn texenv_unsupported_by_host(target: GLenum, pname: GLenum) -> bool {
+    note_texenv_pair(target, pname);
+    target == gles11::TEXTURE_FILTER_CONTROL_EXT
+        && pname == gles11::TEXTURE_LOD_BIAS_EXT
+        && !host_supports_lod_bias_texenv()
+}
+
+/// Diagnostic: log each distinct (target, pname) pair the guest passes to
+/// `glTexEnv*` once (max 24 pairs), so a `GL_INVALID_ENUM` from the driver can
+/// be tied to a concrete call.
+fn note_texenv_pair(target: GLenum, pname: GLenum) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<(GLenum, GLenum)>> = Mutex::new(Vec::new());
+    if let Ok(mut seen) = SEEN.lock() {
+        if seen.len() < 24 && !seen.contains(&(target, pname)) {
+            seen.push((target, pname));
+            log!(
+                "GLES1Native: guest glTexEnv* target=0x{:x} pname=0x{:x} (first use)",
+                target,
+                pname
+            );
+        }
+    }
+}
+
+/// Whether the native-ES1 client array guard is on. On by default; switched
+/// with `--no-native-es1-array-guard` / `--native-es1-array-guard`, which set
+/// `TOUCHHLE_ES1_ARRAY_GUARD` (this backend has no `Options` access).
+fn es1_array_guard_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("TOUCHHLE_ES1_ARRAY_GUARD").as_deref() != Ok("0"))
+}
+
+/// `(array cap, client-active texture unit)` pairs that were temporarily
+/// disabled by [guard_unbacked_client_arrays].
+type DisabledArrays = Vec<(GLenum, GLenum)>;
+
+/// Is the client array `cap` enabled while having neither a buffer object nor
+/// a client pointer? Drawing like that makes strict ES 1.1 drivers (Adreno)
+/// dereference NULL inside the driver and take the whole process down with
+/// SIGSEGV; the lenient iOS-era drivers just drew nothing for that array.
+unsafe fn client_array_is_unbacked(cap: GLenum, pointer_pname: GLenum, binding_pname: GLenum) -> bool {
+    if gles11::IsEnabled(cap) == 0 {
+        return false;
+    }
+    let mut buffer: GLint = 0;
+    gles11::GetIntegerv(binding_pname, &mut buffer);
+    if buffer != 0 {
+        // Data comes from a buffer object (the "pointer" is just an offset).
+        return false;
+    }
+    let mut pointer: *const GLvoid = std::ptr::null();
+    gles11::GetPointerv(pointer_pname, &mut pointer as *mut _ as *const _);
+    pointer.is_null()
+}
+
+/// Temporarily disable every enabled fixed-function client array that has no
+/// data source, right before a draw call. Only uses entry points that are
+/// valid on ES 1.1 (`glIsEnabled`, `glGetPointerv`, `glGetIntegerv`), so it
+/// doesn't poison the error queue. Pair with [restore_client_arrays].
+unsafe fn guard_unbacked_client_arrays() -> DisabledArrays {
+    if !es1_array_guard_enabled() {
+        return Vec::new();
+    }
+    // (array cap, pointer pname, buffer-binding pname)
+    const FIXED_ARRAYS: [(GLenum, GLenum, GLenum); 3] = [
+        (0x8074, 0x808E, 0x8896), // VERTEX_ARRAY
+        (0x8075, 0x808F, 0x8897), // NORMAL_ARRAY
+        (0x8076, 0x8090, 0x8898), // COLOR_ARRAY
+    ];
+    let mut disabled: DisabledArrays = Vec::new();
+    for (cap, pointer_pname, binding_pname) in FIXED_ARRAYS {
+        if client_array_is_unbacked(cap, pointer_pname, binding_pname) {
+            gles11::DisableClientState(cap);
+            disabled.push((cap, 0));
+        }
+    }
+
+    // Texture coordinate arrays are per client-active texture unit.
+    let mut original_unit: GLint = GL_TEXTURE0 as GLint;
+    gles11::GetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, &mut original_unit);
+    let mut max_units: GLint = 1;
+    gles11::GetIntegerv(GL_MAX_TEXTURE_UNITS, &mut max_units);
+    let max_units = max_units.clamp(1, 8) as GLenum;
+    for unit in 0..max_units {
+        let texture = GL_TEXTURE0 + unit;
+        if texture != original_unit as GLenum {
+            gles11::ClientActiveTexture(texture);
+        }
+        if client_array_is_unbacked(GL_TEXTURE_COORD_ARRAY, 0x8092, 0x889A) {
+            gles11::DisableClientState(GL_TEXTURE_COORD_ARRAY);
+            disabled.push((GL_TEXTURE_COORD_ARRAY, texture));
+        }
+    }
+    gles11::ClientActiveTexture(original_unit as GLenum);
+
+    if !disabled.is_empty() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static WARNED: AtomicU32 = AtomicU32::new(0);
+        if WARNED.fetch_add(1, Ordering::Relaxed) < 8 {
+            log!(
+                "Warning: GLES1Native: skipping enabled client array(s) with no buffer and a \
+                 NULL pointer for this draw (would crash the host driver): {:?} \
+                 (cap, texture unit)",
+                disabled
+            );
+        }
+    }
+    disabled
+}
+
+/// Undo [guard_unbacked_client_arrays]: re-enable what it disabled, so the
+/// guest-visible array state is unchanged by the draw.
+unsafe fn restore_client_arrays(disabled: DisabledArrays) {
+    if disabled.is_empty() {
+        return;
+    }
+    let mut original_unit: GLint = GL_TEXTURE0 as GLint;
+    gles11::GetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, &mut original_unit);
+    for (cap, texture) in disabled {
+        if cap == GL_TEXTURE_COORD_ARRAY {
+            gles11::ClientActiveTexture(texture);
+        }
+        gles11::EnableClientState(cap);
+    }
+    gles11::ClientActiveTexture(original_unit as GLenum);
+}
+
 pub struct GLES1Native<'gl_ctx> {
     _gl_lifetime: PhantomData<&'gl_ctx ()>,
     /// Synthetic error queue for OpenGL ES 2.0 entry points that are not
@@ -698,7 +843,9 @@ impl GLES for GLES1Native<'_> {
 
     // Drawing
     unsafe fn DrawArrays(&mut self, mode: GLenum, first: GLint, count: GLsizei) {
-        gles11::DrawArrays(mode, first, count)
+        let disabled = guard_unbacked_client_arrays();
+        gles11::DrawArrays(mode, first, count);
+        restore_client_arrays(disabled);
     }
 
     unsafe fn DrawElements(
@@ -715,7 +862,9 @@ impl GLES for GLES1Native<'_> {
                 return;
             }
         }
-        gles11::DrawElements(mode, count, type_, indices)
+        let disabled = guard_unbacked_client_arrays();
+        gles11::DrawElements(mode, count, type_, indices);
+        restore_client_arrays(disabled);
     }
 
     // GL_OES_draw_texture
@@ -1039,26 +1188,27 @@ impl GLES for GLES1Native<'_> {
         gles11::CopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height)
     }
     unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat) {
+        if texenv_unsupported_by_host(target, pname) {
+            return;
+        }
         gles11::TexEnvf(target, pname, param)
     }
     unsafe fn TexEnvx(&mut self, target: GLenum, pname: GLenum, param: GLfixed) {
+        if texenv_unsupported_by_host(target, pname) {
+            return;
+        }
         gles11::TexEnvx(target, pname, param)
     }
     unsafe fn TexEnvi(&mut self, target: GLenum, pname: GLenum, param: GLint) {
+        if texenv_unsupported_by_host(target, pname) {
+            return;
+        }
         gles11::TexEnvi(target, pname, param)
     }
 
     unsafe fn TexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat) {
-        if target == gles11::TEXTURE_FILTER_CONTROL_EXT && pname == gles11::TEXTURE_LOD_BIAS_EXT {
-            let extensions = gles11::GetString(gles11::EXTENSIONS);
-            if extensions.is_null()
-                || !CStr::from_ptr(extensions as *const _)
-                    .to_string_lossy()
-                    .split_whitespace()
-                    .any(|extension| extension == "GL_EXT_texture_lod_bias")
-            {
-                return;
-            }
+        if texenv_unsupported_by_host(target, pname) {
+            return;
         }
         if params.is_null() {
             return;
@@ -1067,9 +1217,15 @@ impl GLES for GLES1Native<'_> {
     }
 
     unsafe fn TexEnvxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed) {
+        if texenv_unsupported_by_host(target, pname) {
+            return;
+        }
         gles11::TexEnvxv(target, pname, params)
     }
     unsafe fn TexEnviv(&mut self, target: GLenum, pname: GLenum, params: *const GLint) {
+        if texenv_unsupported_by_host(target, pname) {
+            return;
+        }
         gles11::TexEnviv(target, pname, params)
     }
     unsafe fn MultiTexCoord4f(
