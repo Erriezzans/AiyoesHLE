@@ -45,6 +45,24 @@ public class MainActivity extends SDLActivity {
     // Implemented in Rust (src/lib.rs): true once a game has been picked.
     private static native boolean nativeIsGameRunning();
 
+    // Implemented in Rust (src/lib.rs): whether the Settings screen of the
+    // game list is open, and a request to close it (like pressing "Done").
+    private static native boolean nativeIsSettingsOpen();
+    private static native void nativePostBack();
+
+    // If Settings is open on the game list, the back gesture closes it.
+    private boolean handleBackInSettings() {
+        try {
+            if (!isGameRunning() && nativeIsSettingsOpen()) {
+                nativePostBack();
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Couldn't check settings state", t);
+        }
+        return false;
+    }
+
     private boolean exitDialogShowing = false;
     private android.app.AlertDialog backDialog = null;
     private boolean pausedByBackMenu = false;
@@ -100,6 +118,7 @@ public class MainActivity extends SDLActivity {
 
     private void showBackMenu() {
         if (exitDialogShowing) return;
+        if (handleBackInSettings()) return;
         exitDialogShowing = true;
         final boolean inGame = isGameRunning();
         try {
