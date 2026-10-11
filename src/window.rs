@@ -2746,23 +2746,6 @@ extern "C" {
     fn SDL_AndroidSendMessage(command: u32, param: i32) -> i32;
 }
 
-/// SDL COMMAND_USER value used to tell MainActivity whether an app (game) is
-/// running (param 1) or the app picker menu is showing (param 0). The Android
-/// back button behaves differently in each case. Must match
-/// MainActivity.MSG_GAME_STATE.
-#[cfg(target_os = "android")]
-const GAME_STATE_COMMAND: u32 = 0x8002;
-
-/// Tell the Java side that an app has been picked and is about to run, so the
-/// back button offers "Resume / Back to menu / Exit" rather than the plain
-/// menu exit prompt. No-op on other platforms.
-pub fn notify_game_started() {
-    #[cfg(target_os = "android")]
-    unsafe {
-        SDL_AndroidSendMessage(GAME_STATE_COMMAND, 1);
-    }
-}
-
 /// Ask the Java side to open the system file picker for adding an .ipa file
 /// (see MainActivity.onUnhandledMessage). On other platforms, fall back to
 /// opening the apps directory in the file manager.
