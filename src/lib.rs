@@ -547,3 +547,23 @@ pub extern "system" fn Java_org_touchhle_android_MainActivity_nativeIsGameRunnin
 ) -> u8 {
     GAME_RUNNING.load(std::sync::atomic::Ordering::Relaxed) as u8
 }
+
+/// Called from `MainActivity.java` (`nativeIsSettingsOpen`) on Android.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_org_touchhle_android_MainActivity_nativeIsSettingsOpen(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) -> u8 {
+    environment::app_picker::settings_open() as u8
+}
+
+/// Called from `MainActivity.java` (`nativePostBack`) on Android.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_org_touchhle_android_MainActivity_nativePostBack(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) {
+    environment::app_picker::post_back();
+}
